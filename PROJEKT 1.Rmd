@@ -1,0 +1,1513 @@
+---
+title: "Analiza danych: Bank Marketing"
+author: "Marta Sawikowska  "
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Wprowadzenie
+
+W tej analizie pracujemy z zestawem danych "Bank Marketing" dostępnym na stronie UCI Machine Learning Repository. Dane dotyczą kampanii marketingowych portugalskiego banku i zawierają informacje o cechach klientów oraz wynikach kampanii telefonicznych.
+
+Celem analizy jest porównanie dokładności trzech różnych modeli klasyfikacyjnych:
+
+1.  **Zrelaksowane LASSO,**
+
+2.  **Grupowego LASSO**,
+
+3.  **Regresji logistycznej**.
+
+W szczególności, analiza ma na celu:
+
+-   ocenę dokładności predykcyjnej każdego modelu,
+
+-   zidentyfikowanie predyktorów wybranych przez poszczególne modele,
+
+-   sprawdzenie, czy wszystkie modele popełniają błędy w podobnych miejscach, tj. w przypadku tych samych obserwacji.
+
+W kolejnych etapach przeprowadzimy:
+
+-   Wstępną eksplorację i wizualizację danych.
+
+-   Budowę modeli klasyfikacyjnych i ocenę ich wydajności.
+
+-   Analizę wyników, aby lepiej zrozumieć efektywność każdej metody.
+
+## Opis danych
+
+Zestaw danych zawiera **4521 obserwacji** (wierszy) oraz **17 zmiennych,** opisanych poniżej:
+
+### Atrybuty wejściowe:
+
+1.  **age**: Wiek klienta (liczba całkowita).
+2.  **job**: Rodzaj pracy (kategoria, np. "admin.", "technician").
+3.  **marital**: Stan cywilny (kategoria, np. "married", "single", "divorced").
+4.  **education**: Poziom wykształcenia (kategoria, np. "primary", "secondary", "tertiary").
+5.  **default**: Czy klient ma niespłacone kredyty? (kategoria: "yes", "no").
+6.  **balance**: Średnie saldo na koncie w euro (liczba całkowita).
+7.  **housing**: Czy klient ma kredyt mieszkaniowy? (kategoria: "yes", "no").
+8.  **loan**: Czy klient ma kredyt osobisty? (kategoria: "yes", "no").
+
+### Informacje o kontakcie:
+
+9.  **contact**: Rodzaj kontaktu z klientem (kategoria: "cellular", "telephone").
+10. **day**: Dzień miesiąca, w którym odbył się ostatni kontakt (liczba całkowita).
+11. **month**: Miesiąc ostatniego kontaktu (kategoria, np. "jan", "feb").
+12. **duration**: Czas trwania ostatniego kontaktu w sekundach (liczba całkowita).
+
+### Atrybuty związane z kampanią:
+
+13. **campaign**: Liczba kontaktów wykonanych w ramach bieżącej kampanii (liczba całkowita).
+14. **pdays**: Liczba dni od ostatniego kontaktu z klientem w poprzedniej kampanii (liczba całkowita, -1 oznacza brak kontaktu).
+15. **previous**: Liczba kontaktów wykonanych w ramach poprzedniej kampanii (liczba całkowita).
+16. **poutcome**: Wynik poprzedniej kampanii marketingowej (kategoria: "success", "failure", "unknown").
+
+### Zmienna wyjściowa:
+
+17. **y**: Czy klient otworzył lokatę terminową? (kategoria: "yes", "no").
+
+# Omówienie danych.
+
+```{r Załadowanie pakietów, message=FALSE, warning=FALSE, include=FALSE}
+#install.packages(c("forcats", "ggiraph"))
+library(forcats)
+library(ggiraph)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(corrplot)
+library(gglasso)
+library(glmnet)
+library(caret)
+library(lattice)
+library(reshape2)
+library(boot)
+library(MASS)
+library(ggvenn)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#dane <- read.csv("C:/Users/graba/Desktop/TUS/bank.csv", sep = ";")
+#dane <- read.csv("C:/Users/eweli/Downloads/bank.csv", sep=";")
+
+dane <-read.csv("C:/Users/Admin/OneDrive/Pulpit/PROJEKT PAD/bank.csv", sep = ";")
+```
+
+Przeprowadzamy wstępną eksplorację zbioru danych, aby lepiej zrozumieć strukturę zmiennych numerycznych i kategorycznych. Generujemy histogramy naszych danych, aby przyjrzeć się ich rozkładom i zwizualizować na jakich danych pracujemy.
+
+```{r fig.align='center', fig.height=5, warning=FALSE, , fig.width=10, dpi=300}
+numeric_vars <- dane %>% select_if(is.numeric)
+
+plots <- list()
+for (var in names(numeric_vars)) {
+  p <- ggplot(dane, aes_string(x = var)) +
+    geom_histogram(bins = 20, fill = "#73213A", color = "black", alpha = 0.9) +
+    labs(title = paste("Histogram zmiennej:", "\n", var), x = var, y = "Częstość") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+      axis.title = element_text(size = 12)
+    )
+  plots[[var]] <- p
+}
+
+plot_pairs <- split(plots, ceiling(seq_along(plots) / 2)) 
+for (pair in plot_pairs) {
+  grid.arrange(
+    grobs = pair, 
+    nrow = 1, ncol = 2,
+    top = "Histogramy"
+  )
+}
+```
+
+Dla zmiennych nienumerycznych, analogicznie, budujemy wykresy słupkowe.
+
+```{r, fig.width=10, fig.height=5, dpi=300, fig.align='center'}
+categorical_vars <- dane %>% select_if(~!is.numeric(.))
+
+month_order <- c("jan", "feb", "mar", "apr", "may", "jun", 
+                 "jul", "aug", "sep", "oct", "nov", "dec")
+
+if ("month" %in% names(dane)) {
+  dane$month <- factor(dane$month, levels = month_order)
+}
+
+plots <- list()
+for (var in names(categorical_vars)) {
+  p <- ggplot(dane, aes_string(x = var)) +
+    geom_bar(fill = "#73213A", color = "black", alpha = 0.9) +
+    labs(
+      title = paste("Wykres słupkowy zmiennej:", "\n", var), 
+      x = var, 
+      y = "Liczba wystąpień"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+      axis.title = element_text(size = 12),
+      axis.text.x = element_text(angle = 45, hjust = 1)  
+    )
+  plots[[var]] <- p
+}
+
+plot_pairs <- split(plots, ceiling(seq_along(plots) / 2)) 
+for (pair in plot_pairs) {
+  grid.arrange(
+    grobs = pair, 
+    nrow = 1, ncol = 2,
+    top = "Wykresy słupkowe"
+  )
+}
+
+
+```
+
+Przed przystąpieniem do analizy i budowy modeli, przeprowadzamy ocenę korelacji między zmiennymi w celu zrozumienia potencjalnych zależności. Celem tej analizy jest zidentyfikowanie silnych korelacji, które mogą wpływać na nasze modele, oraz wykluczenie zmiennych o wysokiej współliniowości.
+
+```{r, fig.width=10, fig.height=8, dpi=300, fig.align='center'}
+numeric_vars <- dane %>% select_if(is.numeric)
+cor_matrix_num <- cor(numeric_vars)
+
+corrplot(cor_matrix_num, 
+         method = "color",
+         type = "lower",
+         order = "hclust",
+         tl.col = "#192F4F",      
+         tl.cex = 1.2,            
+         tl.srt = 45,             
+         addCoef.col = "black",   
+         number.cex = 0.9,        
+         cl.ratio = 0.15,         
+         cl.align = "l",          
+         cl.length = 11,          
+         col = colorRampPalette(c("#192F4F", "#FFFFFF", "#73213A"))(100), 
+         addgrid.col = "gray90",  
+         diag = TRUE,
+         mar = c(0,0,2,0))        
+
+title("Macierz korelacji dla zmiennych numerycznych", cex.main = 2.0) 
+```
+
+Aby sprawdzić korelację pomiędzy zmiennymi jakościowymi, zamieniamy na wartości na binarne, dodając kolejne kolumny odpowiadające czy argument zachodzi 1 czy nie 0.
+
+```{r, fig.width=10, fig.height=8, dpi=300, fig.align='center'}
+categorical_vars <- dane %>% 
+    select_if(~!is.numeric(.)) %>%
+    mutate(across(everything(), as.factor))
+
+binary_matrix <- model.matrix(~ . - 1, data = categorical_vars)
+cor_matrix_bin <- cor(binary_matrix)
+
+corrplot(cor_matrix_bin,
+         method = "color",
+         type = "lower",
+         tl.col = "#192F4F",      
+         tl.cex = 1.2,            
+         tl.srt = 45,             
+         cl.ratio = 0.15,         
+         cl.align = "l",          
+         cl.length = 11,          
+         col = colorRampPalette(c("#192F4F", "#FFFFFF", "#73213A"))(100),
+         addgrid.col = "gray90",  
+         diag = TRUE,
+         mar = c(0,0,2,0))        
+
+title("Macierz korelacji dla zmiennych numerycznych", cex.main = 2.0)
+
+```
+
+Możemy zauważyć, że niektóre ze zmiennych są skorelowane, jednak ta korelacja występuje przy różnych argumentach tej samej zmiennej, co jest zupełnie naturalne.
+
+## Standaryacja danych.
+
+Przed przystąpieniem do budowy modeli, przeprowadzamy standaryzację danych. Dzięki temu wszystkie zmienne mają podobną skalę, co jest ważne, ponieważ bez tego, zmienne o większej skali mogłyby wpłynąć na wyniki modelu. Standaryzacja pomaga też w szybszym i bardziej stabilnym procesie uczenia modelu, a współczynniki stają się łatwiejsze do porównania.
+
+```{r}
+numeric_vars <- dane %>% select_if(is.numeric)
+scaled_numeric_vars <- scale(numeric_vars)
+scaled_numeric_vars <- as.data.frame(scaled_numeric_vars)
+colnames(scaled_numeric_vars) <- colnames(numeric_vars)
+categorical_vars <- dane %>% select_if(~!is.numeric(.))
+
+
+standardized_data <- cbind(scaled_numeric_vars, categorical_vars)
+standardized_data$y <- as.numeric(standardized_data$y == "yes")
+
+```
+
+# 1. Zrelasowane LASSO
+
+Przed rozpoczęciem pracy nad modelami, przygotowany zestaw danych w sposób losowy dzielimy na zbiór uczący (70%) oraz testowy (30%).
+
+```{r warning=FALSE, include=FALSE}
+set.seed(123)
+trainIndex <- createDataPartition(standardized_data$y, p = 0.7, list = FALSE) 
+train_data <- standardized_data[trainIndex, ]
+test_data <- standardized_data[-trainIndex, ]
+```
+
+```{r include=FALSE}
+X_train <- model.matrix(y ~ ., train_data)[, -1]  
+y_train <- as.integer(train_data$y == "1") 
+
+X_test <- model.matrix(y ~ ., test_data)[, -1]
+y_test <- as.integer(test_data$y == "1")
+```
+
+W zrelaksownaym lasso zaczynamy od dopasowania modelu LASSO dla pełnego zbioru predyktorów a następnie, eliminujemy zmienne, które nie mają wpłwu na wynik. Jednocześnie dla jednoznacznej interpretacji, jeśli jakaś kategoria predyktora zostanie wybrana to uwzględniamy pełną zmienną objaśniającą.
+
+```{r}
+# Krok 1: Dopasowanie modelu Lasso na całym zbiorze predyktorów
+lasso_model <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1)
+lasso_coefs <- coef(lasso_model, s = "lambda.min")
+
+# Krok 2: Znalezienie indeksów wybranych predyktorów
+selected_features <- which(lasso_coefs[-1] != 0)  # Omijamy intercept i wybieramy niewyzerowane cechy
+selected_feature_names <- colnames(X_train)[selected_features]
+
+# Krok 3: Utworzenie pełnego zbioru zmiennych związanych z każdą grupą
+related_features <- c("balance", "day", "duration", "campaign", 
+  grep("^job", colnames(X_train), value = TRUE),  
+  grep("^marital", colnames(X_train), value = TRUE),  
+  grep("^education", colnames(X_train), value = TRUE),  
+  grep("^default", colnames(X_train), value = TRUE),  
+  grep("^housing", colnames(X_train), value = TRUE),  
+  grep("^loan", colnames(X_train), value = TRUE),  
+  grep("^contact", colnames(X_train), value = TRUE),  
+  grep("^month", colnames(X_train), value = TRUE),  
+  grep("^poutcome", colnames(X_train), value = TRUE)
+)
+
+# Krok 4: Wybranie predyktorów w X_train i X_test na podstawie powiązanych zmiennych
+X_train_related <- X_train[, related_features]
+X_test_related <- X_test[, related_features]
+
+# Krok 5: Dopasowanie modelu Lasso na powiązanych predyktorach
+relaxed_lasso_model <- cv.glmnet(X_train_related,
+                                 y_train, family = "binomial", alpha = 1)
+
+# Prognozowanie prawdopodobieństw na zbiorze testowym
+predicted_probabilities_relaxed <- predict(relaxed_lasso_model,
+                                   newx = X_test_related,
+                                   s = "lambda.min", type = "response")
+
+predicted_classes_relaxed <- ifelse(predicted_probabilities_relaxed > 0.5, 1, 0)
+
+test_data$predicted_probability <- predicted_probabilities_relaxed
+test_data$predicted_class_relaxed <- as.factor(predicted_classes_relaxed)
+accuracy <- mean(test_data$predicted_class_relaxed == test_data$y) * 100
+
+print(paste("Dokładność modelu wynosi:", round(accuracy, 2), "%"))
+```
+
+### Macierz Pomyłek
+
+Budujemy macierz pomyłek dla modelu zrelaksowanego Lasso, aby uzyskać szczegółowe informacje o skuteczności klasyfikacji, w tym o liczbie poprawnych i błędnych przewidywań.
+
+```{r, fig.width=10, fig.height=8, dpi=300, fig.align='center'}
+conf_matrix_rel <- table(Predicted = ifelse(predicted_probabilities_relaxed > 0.5, 1, 0), Actual = y_test)
+
+conf_df_rel <- as.data.frame(as.table(conf_matrix_rel))
+
+ggplot(conf_df_rel, aes(x = Actual, y = Predicted, fill = Freq)) +
+  geom_tile(color = "#d3d3d3", linewidth = 0.8, width = 0.9, height = 0.9) +
+  geom_text(aes(label = Freq), size = 8, fontface = "bold", color = "white") +
+  scale_fill_gradientn(colors = c("#d3d3d3", "#D36687", "#73213A")) +
+  labs(
+    title = "Macierz Pomyłek",
+    subtitle = "Wyniki modelu zrelaksowanego Lasso",
+    x = "Rzeczywiste wartości",
+    y = "Przewidywane wartości",
+    fill = "Częstość"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold", color = "#4F191C"),
+    plot.subtitle = element_text(hjust = 0.5, size = 16, color = "gray40"),
+    axis.text = element_text(size = 16, face = "bold", color = "gray40"),
+    axis.title = element_text(size = 18, face = "bold", color = "#4F191C"),
+    axis.title.y = element_text(margin = margin(r = 20)),
+    legend.position = "right",
+    legend.key.size = unit(1.2, "cm"),
+    legend.title = element_text(size = 18, face = "bold"),
+    legend.text = element_text(size = 16)
+  )
+```
+
+```{r include=FALSE}
+# Wyciąganie elementów z macierzy pomyłek
+TP <- conf_matrix_rel[2, 2]  # True Positive
+TN <- conf_matrix_rel[1, 1]  # True Negative
+FP <- conf_matrix_rel[1, 2]  # False Positive
+FN <- conf_matrix_rel[2, 1]  # False Negative
+
+# Obliczanie wskaźników
+sensitivity <- TP / (TP + FN)  # Czułość
+precision <- TP / (TP + FP)  # Precyzja
+f1_score <- 2 * (precision * sensitivity) / (precision + sensitivity)  # F1-score
+specificity <- TN / (TN + FP)  # Specyficzność
+```
+
+Wyniki modelu zrelaksowanego Lasso są adekwatne do rzeczywistej wartości zmiennej zależnej (y), ponieważ w zbiorze danych mamy tylko około 500 przypadków z wartością 1, co skutkuje dużą liczba poprawnych klasyfikacji negatywnych (0).
+
+Dodatkowo z macierzy pomyłek możemy uzyskać kilka innych wskaźników, takich jak:
+
+#### 1. Sensitivity (Czułość, TPR)
+
+Czułość określa, jaki procent rzeczywistych przypadków pozytywnych został prawidłowo rozpoznany przez model. Jest kluczowa w problemach, gdzie ważne jest minimalizowanie liczby fałszywych negatywów (FN).
+
+$$
+\text{Sensitivity} = \frac{\text{TP}}{\text{TP} + \text{FN}} = \frac{51}{51 + 30} = \frac{51}{81} \approx 0.6296 \, (62.96\%)
+$$
+
+------------------------------------------------------------------------
+
+#### 2. Specificity (Specyficzność, TNR)
+
+Specyficzność wskazuje, jaki procent rzeczywistych przypadków negatywnych został prawidłowo sklasyfikowany. Jest istotna, gdy chcemy zminimalizować liczbę fałszywych pozytywów (FP).
+
+$$
+\text{Specificity} = \frac{\text{TN}}{\text{TN} + \text{FP}} = \frac{1174}{1174 + 101} = \frac{1174}{1275} \approx 0.9207 \, (92.07\%)
+$$
+
+------------------------------------------------------------------------
+
+#### 3. Precision (Precyzja, PPV)
+
+Precyzja określa, jaki procent przypadków zaklasyfikowanych jako pozytywne rzeczywiście jest pozytywny. Jest szczególnie istotna, gdy chcemy uniknąć fałszywych alarmów (FP).
+
+$$
+\text{Precision} = \frac{\text{TP}}{\text{TP} + \text{FP}} = \frac{51}{51 + 101} = \frac{51}{152} \approx 0.3355 \, (33.55\%)
+$$
+
+------------------------------------------------------------------------
+
+#### 4. F1-score
+
+F1-score to harmoniczna średnia czułości i precyzji, uwzględniająca równowagę między tymi miarami. Jest szczególnie przydatny w przypadku nierównomiernych klas.
+
+$$
+\text{F1} = 2 \cdot \frac{\text{Precision} \cdot \text{Sensitivity}}{\text{Precision} + \text{Sensitivity}} = 2 \cdot \frac{0.3355 \cdot 0.6296}{0.3355 + 0.6296} = 2 \cdot \frac{0.2114}{0.9651} \approx 0.4378 \, (43.78\%)
+$$\
+
+### Analiza błędów predykcji
+
+Chcemy zobaczyć, na jakich indeksach obserwacji model zrelaksowanego Lasso popełnia błędy w swojej klasyfikacji. Aby to uzyskać, tworzymy wykres przedstawiający przewidywane prawdopodobieństwa przypisania do klasy, z zaznaczeniem, które obserwacje zostały błędnie sklasyfikowane. Dla lepszej czytelności wykres jest podzielony na dwa panele, odpowiadające poszczególnym klasom (0 i 1).
+
+```{r, fig.width=10, fig.height=8, dpi=300, fig.align='center'}
+test_data$error_relaxed_lasso <- ifelse(test_data$predicted_class_relaxed == test_data$y, "Poprawna", "Błąd")
+
+test_data$error_relaxed_lasso <- as.factor(test_data$error_relaxed_lasso)  
+
+ggplot(test_data, aes(x = as.numeric(row.names(test_data)),
+                      y = predicted_probabilities_relaxed)) +
+  geom_point(aes(color = error_relaxed_lasso, shape = as.factor(y)),
+             size = 4, alpha = 0.6) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "black", linewidth = 1) +
+  facet_wrap(~y, nrow = 2, scales = "free_x") +
+  scale_color_manual(values = c("Poprawna" = "#33C430", "Błąd" = "#E31138")) +
+  scale_shape_manual(values = c("0" = 16, "1" = 17)) +
+  labs(
+    title = "Analiza błędów predykcji modelu Relaxed Lasso",
+    subtitle = "Podział według rzeczywistej klasy (y)",
+    x = "Indeks obserwacji",
+    y = "Przewidywane prawdopodobieństwo",
+    color = "Typ predykcji",
+    shape = "Rzeczywiste y"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    strip.text = element_text(size = 22, face = "bold"),
+    plot.subtitle = element_text(size = 16),
+    plot.title = element_text(size = 24, face = "bold"),
+    axis.title = element_text(size = 16),
+    axis.title.y = element_text(margin = margin(r = 20)),
+    axis.text = element_text(size = 12),
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 16),
+    panel.spacing = unit(1.5, "lines")
+  )
+```
+
+Z wykresu wyraźnie wynika, że model znacznie lepiej radzi sobie z identyfikacją obserwacji należących do klasy 0, popełniając znacznie mniej błędów niż w przypadku klasy 1. Taka sytuacja może wynikać z charakterystyki danych – w zbiorze mamy jedynie około 500 obserwacji klasy 1, co powoduje, że dane są niezrównoważone. Dodatkowo, losowy podział na zbiór treningowy i testowy mógł skutkować niewystarczającą liczbą próbek klasy 1 w zbiorze treningowym, przez co model miał ograniczoną możliwość nauczenia się skutecznej klasyfikacji tej klasy. To mogło wpłynąć na niższą jakość predykcji dla klasy 1.
+
+### Ważność zmiennych.
+
+```{r}
+grupy <- c(
+  "balance", "day", "duration", "campaign", 
+  "job", "marital", "education", "default", 
+  "housing", "loan", "contact", "month", "poutcome"
+)
+
+variable_names <- c(
+  "balance", "day", "duration", "campaign", 
+  "job", "marital", "education", "default", 
+  "housing", "loan", "contact", "month", "poutcome"
+)
+
+final_coeff <- coef(relaxed_lasso_model, s = "lambda.min")
+
+# Obliczanie normy L2 dla każdej grupy zmiennych
+group_importance <- sapply(grupy, function(grupa) {
+  group_coeffs <- final_coeff[grep(grupa, rownames(final_coeff)),] 
+  norm_L2 <- sqrt(sum(group_coeffs^2))  
+  return(norm_L2)
+})
+
+# Przygotowanie dataframe z nazwami grup i ich ważnością
+importance_df_rel <- data.frame(
+  group = variable_names,       
+  importance = group_importance 
+)
+
+# Usuwanie grup, które mają brakujące wartości lub normę L2 równą 0
+importance_df_rel <- importance_df_rel[!is.na(importance_df_rel$importance) & importance_df_rel$importance != 0, ]
+
+# Wizualizacja wykresu ważności zmiennych
+ggplot(importance_df_rel, aes(x = reorder(group, importance), y = importance, fill = importance)) +
+  geom_bar(stat = "identity", color = "black", alpha = 0.9, width = 0.8) +
+  scale_fill_gradientn(
+    colors = c("#fee08b", "#e6f598", "#99d594", "#3288bd", "#5e4fa2"), 
+    values = c(0, 0.1, 0.3, 0.6, 1)  
+  ) +
+  coord_flip() +  
+  labs(
+    title = "Ważność zmiennych w modelu zrelaksowanego Lasso",
+    x = "Grupy zmiennych",
+    y = "Ważność (norma L2)",
+    fill = "Ważność"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10)
+  )
+```
+
+Na wykresie prezentuje się ważność poszczególnych zmiennych w modelu zrelaksowanego Lasso, mierzoną normą L2 ich współczynników. Z analizy wynika, że zmienne **`month`** oraz **`poutcome`** mają zdecydowanie najwyższą wartość ważności, co wskazuje na ich istotny wpływ na predykcję modelu.
+
+Inne zmienne, takie jak **`duration`**, **`job`** oraz **`contact`**, również odgrywają istotną rolę, choć ich wpływ jest nieco mniejszy w porównaniu do wspomnianych wcześniej zmiennych. Z kolei **`day`** oraz **`balance`** mają najniższe wartości normy L2, co sugeruje, że ich wkład w wyniki modelu jest znikomy
+
+### Krzywa błędu kroswalidacji
+
+Chcemy zobaczyć jak zmienia się średnia strata, w zależności od wartości lambda.
+
+```{r, fig.width=10, fig.height=8, dpi=300, fig.align='center'}
+# Wyciąganie błędów kroswalidacji i wartości lambda
+cv_errors <- relaxed_lasso_model$cvm
+lambda_values <- relaxed_lasso_model$lambda
+std_errors <- relaxed_lasso_model$cvsd
+
+# Tworzenie data.frame z danymi do wykresu
+cv_data_relaxed <- data.frame(
+  Lambda = lambda_values,
+  Misclassification_Error = cv_errors,
+  Std_Error = std_errors
+)
+
+# Wykres z wartościami lambdy bez logarytmowania
+ggplot(cv_data_relaxed, aes(x = Lambda, y = Misclassification_Error)) +
+  geom_point(color = "#73213A", size = 3, alpha = 0.5) +  
+  geom_errorbar(aes(ymin = Misclassification_Error - Std_Error,
+                    ymax = Misclassification_Error + Std_Error), 
+                width = 0.3, color = "#377EB8", alpha = 0.7) +  
+  geom_vline(xintercept = relaxed_lasso_model$lambda.min,
+             linetype = "dashed", color = "black", linewidth = 1.2) +  
+  annotate("text", x = relaxed_lasso_model$lambda.min * 1.1, 
+           y = min(cv_data_relaxed$Misclassification_Error) + 0.15, 
+           label = paste("Optymalna lambda:",
+                         round(relaxed_lasso_model$lambda.min, 5)),
+           color = "black", size = 6, hjust = 0) + 
+  labs(title = "Błąd klasyfikacji Zrelaksowanego Lasso w zależności od lambda",
+       subtitle = "Minimalny błąd kroswalidacji oraz zmienność błędów dla różnych wartości λ",
+       x = "Lambda", y = "Błąd klasyfikacji") +
+  scale_x_continuous(trans = "log10",  # Skala log10 dla osi X
+                     breaks = scales::trans_breaks("log10", function(x) 10^x),
+                     labels = scales::trans_format("log10",
+                                                   scales::math_format(10^.x))) +
+  theme_minimal() +
+ theme(
+    axis.text.x = element_text(size = 16, hjust = 1),
+    axis.text.y = element_text(size = 16),
+    axis.title.y = element_text(margin = margin(r = 20)),
+    axis.title = element_text(size = 18, face = "bold"),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 18, face = "italic", hjust = 0.5),
+    legend.text = element_text(size = 14),
+    panel.grid.major = element_line(color = "gray80", linewidth = 0.6),
+    panel.grid.minor = element_blank()) 
+
+```
+
+Wykres ma na celu przedstawienie, jak zmienia się błąd w zależności od różnych wartości parametru regularyzacji lambda. Można zauważyć, że początkowo strata utrzymuje stabilny poziom, a następnie rośnie dość gwałtownie. Z racji bardzo małej wartości lambda model jest mniej regularyzowany, co prowadzi do budowy bardziej złożonego modelu. Z faktu mniejszej kary za dodatkowe predyktory, nasz model składa się aż z 13 zmiennych objaśniających.
+
+Chwili zastanowienia wymaga jednak najniższa wartość błędu, ponieważ wynosi aż 0.5, co sugeruje że predykcje naszego modelu są praktycznie równie skuteczne, jak zgadywanie. Przyczyną może być chociażby fakt niezróważonych danych (dominacji jednej klasy) lub brak istotnych cech rozróżniających klasy.
+
+Innym powodem może być sposób przeprowadzania zrelaksowanego Lasso, gdzie uwzględniamy cały predyktor, gdy choćby jedna zmienna zostanie wybrana przez Lasso. Może to prowadzić do wprowadzenia do modelu nieistotnych zmiennych, w skutek czego obniżamy zdolność rozróżniania klas.
+
+# 2. Grupowe LASSO
+
+### Podział na grupy
+
+Wykonujemy podział na grupy, tak aby każda zmienna numeryczna była przypisana do oddzielnej grupy, natomiast predyktory kategoryczne ("rozbite" na kilka kolumn i zakodowane jako zmienne binarne) zostały połączone w jedną grupę.
+
+```{r}
+grupy <- c(
+  rep(1, 1),  # age
+  rep(2, 1),  # balance
+  rep(3, 1),  # day
+  rep(4, 1),  # duration
+  rep(5, 1),  # campaign
+  rep(6, 1),  # pdays
+  rep(7, 1),  # previous
+  rep(8, length(unique(train_data$job))-1),  # job (9 kategorii)
+  rep(9, length(unique(train_data$marital))-1),  # marital (3 kategorie )
+  rep(10, length(unique(train_data$education))-1), # education (3 kategorie)
+  rep(11, 1), # default (zmienna binarna)
+  rep(12, 1), # housing (zmienna binarna)
+  rep(13, 1), # loan (zmienna binarna)
+  rep(14, length(unique(train_data$contact))-1), # contact (2 kategorie)
+  rep(15, length(unique(train_data$month))-1),# month (12 kategorii)
+  rep(16, length(unique(train_data$poutcome))-1)  # poutcome (3 kategorie) 
+)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Zamiana zmiennej celu na -1 i 1
+y_train_transformed <- ifelse(y_train == 0, -1, 1)
+y_test_transformed <- ifelse(y_test == 0, -1, 1)
+
+group_lasso_model <- cv.gglasso(
+  X_train, 
+  y_train_transformed, 
+  group = grupy, 
+  nfolds = 10, 
+  loss = "logit"
+)
+
+# Prognozowanie na zbiorze testowym (logity)
+predicted_logits_group_lasso <- predict(
+  group_lasso_model, 
+  newx = X_test, 
+  s = "lambda.min", 
+  type = "link"  
+)
+
+# Konwersja logitów na prawdopodobieństwa
+sigmoid <- function(z) 1 / (1 + exp(-z))
+predicted_probabilities_group_lasso <- sigmoid(predicted_logits_group_lasso)
+test_data$predicted_probabilities_group_lasso <-predicted_probabilities_group_lasso
+
+predicted_classes_group_lasso <- ifelse(predicted_logits_group_lasso > 0, 1, -1)
+predicted_classes_group_lasso_original <- ifelse(predicted_classes_group_lasso == -1, 0, 1)
+
+test_data$predicted_class_group_lasso <- predicted_classes_group_lasso_original
+
+group_lasso_acc <- mean(predicted_classes_group_lasso_original == y_test)
+cat("Dokładność dla grupowego Lasso:", group_lasso_acc, "\n")
+```
+
+### Macierz pomyłek
+
+Ponownie budujemy macierz pomyłek, aby zobaczyć w jaki sposób model przewiduje klasy w porównaniu z rzeczywistymi etykietami oraz by uzyskać wgląd na rodzaje popełnianych błędów.
+
+```{r, fig.width=10, fig.height=8, dpi=300, fig.align='center'}
+conf_matrix_g <- table(Predicted = predicted_classes_group_lasso_original, Actual = y_test)
+
+conf_df_g <- as.data.frame(as.table(conf_matrix_g))
+
+ggplot(conf_df_g, aes(x = Actual, y = Predicted, fill = Freq)) +
+  geom_tile(color = "#d3d3d3", linewidth = 0.8, width = 0.9, height = 0.9) +
+  geom_text(aes(label = Freq), size = 8, fontface = "bold", color = "white") +
+  scale_fill_gradientn(colors = c("#d3d3d3", "#D36687", "#73213A")) +
+  labs(
+    title = "Macierz Pomyłek",
+    subtitle = "Wyniki modelu grupowego Lasso",
+    x = "Rzeczywiste wartości",
+    y = "Przewidywane wartości",
+    fill = "Częstość"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold", color = "#73213A"),
+    plot.subtitle = element_text(hjust = 0.5, size = 16, color = "gray40"),
+    axis.text = element_text(size = 16, face = "bold", color = "gray40"),
+    axis.title = element_text(size = 18, face = "bold", color = "#73213A"),
+    axis.title.y = element_text(margin = margin(r = 20)),
+    legend.position = "right",
+    legend.key.size = unit(1.2, "cm"),
+    legend.title = element_text(size = 18, face = "bold"),
+    legend.text = element_text(size = 16)
+  )
+```
+
+```{r include=FALSE}
+TP <- conf_matrix_g[2, 2]  # True Positive
+TN <- conf_matrix_g[1, 1]  # True Negative
+FP <- conf_matrix_g[1, 2]  # False Positive
+FN <- conf_matrix_g[2, 1]  # False Negative
+
+# Obliczanie wskaźników
+sensitivity <- TP / (TP + FN)  # Czułość
+precision <- TP / (TP + FP)  # Precyzja
+f1_score <- 2 * (precision * sensitivity) / (precision + sensitivity)  # F1-score
+specificity <- TN / (TN + FP)  # Specyficzność
+```
+
+#### 1. Sensitivity (Czułość)
+
+$$
+\text{Sensitivity} = \frac{\text{TP}}{\text{TP} + \text{FN}} = \frac{40}{40 + 25} = \frac{40}{65} \approx 0.6154 \, (61.54\%)
+$$
+
+#### 2. Specificity (Specyficzność)
+
+$$
+\text{Specificity} = \frac{\text{TN}}{\text{TN} + \text{FP}} = \frac{1179}{1179 + 112} = \frac{1179}{1291} \approx 0.9132 \,  (91.32\%)
+$$
+
+#### 3. Precision (Precyzja)
+
+$$
+\text{Precision} = \frac{\text{TP}}{\text{TP} + \text{FP}} = \frac{40}{40 + 112} = \frac{40}{152} \approx 0.2632 \, (26.32\%)
+$$
+
+#### 4. F1-score
+
+$$
+\text{F1} = 2 \cdot \frac{\text{Precision} \cdot \text{Sensitivity}}{\text{Precision} + \text{Sensitivity}} = 2 \cdot \frac{0.2632 \cdot 0.6154}{0.2632 + 0.6154} = 2 \cdot \frac{0.1619}{0.8786} \approx 0.3686 \, (36.86\%)
+$$
+
+### Analiza błędów predykcji
+
+```{r, fig.width=10, fig.height=8, dpi=300, fig.align='center'}
+test_data$error_group_lasso <- ifelse(
+  test_data$predicted_class_group_lasso == test_data$y, 
+  "Poprawna", 
+  "Błąd")
+
+test_data$error_group_lasso <- as.factor(test_data$error_group_lasso)
+
+ggplot(test_data, aes(x = as.numeric(row.names(test_data)), y = predicted_probabilities_group_lasso)) +
+  geom_point(aes(color = error_group_lasso, shape = as.factor(y)), size = 4, alpha = 0.5) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "black", linewidth = 1) +
+  facet_wrap(~y, nrow = 2, scales = "free_x") +
+  scale_color_manual(values = c("Poprawna" = "#33C430", "Błąd" = "#E31138")) +
+  scale_shape_manual(values = c("0" = 16, "1" = 17)) +
+  labs(
+    title = "Analiza błędów predykcji modelu Grupowego Lasso",
+    subtitle = "Podział według rzeczywistej klasy (y)",
+    x = "Indeks obserwacji",
+    y = "Przewidywane prawdopodobieństwo",
+    color = "Typ predykcji",
+    shape = "Rzeczywiste y"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    strip.text = element_text(size = 22, face = "bold"),
+    plot.subtitle = element_text(size = 16),
+    plot.title = element_text(size = 24, face = "bold"),
+    axis.title = element_text(size = 16),
+    axis.title.y = element_text(margin = margin(r = 20)),
+    axis.text = element_text(size = 12),
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 16),
+    panel.spacing = unit(1.5, "lines")
+  )
+
+```
+
+Tak jak w przypadku zrelaksowanego Lasso zauważamy problem z identyfikacją zmiennych klasy 1. Model znacznie lepiej radzi sobie z prognozowaniem wyników dla klasy 0, popełniając znacznie mniej błędów.
+
+### Ważność zmiennych
+
+Przedstawiamy ważność poszczególnych predyktorów.
+
+```{r, fig.width=10, fig.height=8, dpi=300, fig.align='center'}
+final_coeff <- coef(group_lasso_model, s = "lambda.min")
+
+group_importance <- sapply(unique(grupy), function(grupa) {
+  group_coeffs <- final_coeff[grupy == grupa]  
+  sqrt(sum(group_coeffs^2))  # Norma L2 dla grupy
+})
+
+variables <- c("age", "balance", "day", "duration", "campaign", "pdays",
+               "previous", "job", "marital", "education", "default",
+               "housing", "loan", "contact", "month", "poutcome")
+
+importance_df_group <- data.frame(
+  group = variables,   
+  importance = group_importance  # Ważność każdej grupy
+)
+
+# Wizualizacja
+ggplot(importance_df_group, aes(x = reorder(group, importance), y = importance, fill = importance)) +
+  geom_bar(stat = "identity", color = "black", alpha = 0.9, width = 0.8) +
+  scale_fill_gradientn(
+    colors = c("#fee08b", "#e6f598", "#99d594", "#3288bd", "#5e4fa2"), 
+    values = c(0, 0.1, 0.3, 0.6, 1)  
+  ) +
+  coord_flip() +  
+  labs(
+    title = "Ważność zmiennych w modelu grupowego Lasso",
+    x = "Zmienne",
+    y = "Ważność (norma L2)",
+    fill = "Ważność"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10)
+  )
+
+```
+
+Dla grupowego lasso również swtorzyłyśmy, wykres z uporządkowanymi zmiennymi według ich normy L2. W tym przypadku, obliczając pierwiastek z sumy kwadratów wspólczynników w obrębie grupy, uzyskujemy miarę ich łącznej "siły".
+
+Wyższa wartość oznacza większy wkład grupy w model predykcyjny. Grupy o niskiej ważności wskazują na fakt, że ich wpływ na wyniki modelu jest znikomy.
+
+#### Inne podejście
+
+Zastosujemy inne podejście do oceny ważności zmiennych w modelu, prezentując wyniki za pomocą wykresu radarowego. W tym podejściu przedstawiamy wpływ grup zmiennych na model na podstawie estymowanych współczynników beta. Każda grupa zmiennych jest reprezentowana przez dodatnie i ujemne wartości beta, co pozwala ocenić zarówno kierunek, jak i siłę ich wpływu na wynik modelu. Grupy o wyższych wartościach beta mają większy wpływ, a grupy z wartościami bliskimi zera są mniej istotne.
+
+```{r}
+MP_gLasso <- function(cv_object, group, lambda.type = "min", sort.type = "mean", max.shown = 20, intercept=TRUE) {
+
+  ifelse(lambda.type == "min", coef <- coef(cv_object$gglasso.fit, s=cv_object$lambda.min),
+         coef <- coef(cv_object$gglasso.fit, s=cv_object$lambda.1se))
+  ifelse(lambda.type == "min", lambda <- round(cv_object$lambda.min, 4),
+         lambda <- round(cv_object$lambda.1se, 4))
+  
+  if (intercept) {
+    coef_name <- dimnames(coef)[[1]][-1]
+    coef <- coef[-1]
+  } else {coef_name <- dimnames(coef)[[1]]}
+  
+  if (mode(group) == "numeric"){
+    group <- as.character(group)
+  }
+  
+  idx <- (coef != 0)
+  idx2 <- group %in% group[idx]
+  
+  beta <- coef[idx2]
+  beta_name <- coef_name[idx2]
+  
+  group_name <- group[idx2]
+  group_size <- as.integer(table(group_name))
+  
+  gname <- unique(group_name)
+  gid <- as.numeric(factor(group_name))
+  
+  len <- length(gname)
+  
+  if(len == 0){
+    stop('No variable with non-zero coefficient')
+  }
+  if(len> max.shown){ 
+    if(sort.type == 'mean'){
+        avgbeta_abs <- tapply(abs(beta), group_name, mean)  
+        oo <- order(avgbeta_abs, decreasing = TRUE)
+        gname = rownames(avgbeta_abs[oo][1:max.shown])
+        idx2 = group %in% gname
+        beta <- coef[idx2]
+        beta_name <- coef_name[idx2]
+      
+        group_name <- group[idx2]
+        group_size <- as.integer(table(group_name))
+      
+        gname <- unique(group_name)
+        gid <- as.numeric(factor(group_name))
+      
+        len <- length(gname)
+    }else{
+      max.beta_abs <- tapply(abs(beta), group_name, max)  
+      oo <- order(max.beta_abs, decreasing = TRUE)
+      gname = rownames(max.beta_abs[oo][1:max.shown])
+      idx2 = group %in% gname
+      beta <- coef[idx2]
+      beta_name <- coef_name[idx2]
+      
+      group_name <- group[idx2]
+      group_size <- as.integer(table(group_name))
+      
+      gname <- unique(group_name)
+      gid <- as.numeric(factor(group_name))
+      
+      len <- length(gname)
+    }
+  }
+
+  if (sort.type == "mean") {
+    avgbeta_abs <- tapply(abs(beta), group_name, mean)  
+    oo <- order(avgbeta_abs, decreasing = TRUE)
+    scale <- tapply(abs(beta), group_name, mean) / tapply(abs(beta), group_name, max)
+    
+    data <- data.frame(beta=beta, group_name=factor(gid))
+    data$sign <- ifelse(data$beta > 0, "beta \nwith positive sign", "beta \nwith negative sign")
+    
+    p2 <- data %>% 
+      group_by(group_name) %>% 
+      summarise(avg_beta = mean(abs(beta)), gsize=n()) %>% 
+      mutate(group_name = fct_reorder(group_name, avg_beta, .desc=TRUE),
+             group_size = fct_reorder(factor(gsize), gsize, .desc=FALSE)) %>% 
+      ggplot() +
+      geom_bar(aes(x=group_name, y=avg_beta, fill=group_size), col="black",
+               stat="identity", width = 1) +
+      theme_light() +
+      scale_fill_manual(values = c( "#5e4fa2","#3288bd", "#99d594", "#e6f598")) +
+      scale_x_discrete(breaks=factor(unique(gid)), labels=gname) +
+      coord_polar()
+  } else {
+    max.beta_abs <- tapply(abs(beta), group_name, max)  
+    oo <- order(max.beta_abs, decreasing = TRUE)
+    scale <- rep(1, length(unique(group_name)))
+    
+    data <- data.frame(beta=beta, group_name=factor(gid))
+    data$sign <- ifelse(data$beta > 0, "beta \nwith positive sign", "beta \nwith negative sign")
+    
+    p2 <- data %>%
+      group_by(group_name) %>%
+      summarise(max_beta = max(abs(beta)), gsize=n()) %>%
+      mutate(group_name = fct_reorder(group_name, max_beta, .desc=TRUE),
+             group_size = fct_reorder(factor(gsize), gsize, .desc=FALSE)) %>%
+      ggplot() +
+      geom_bar(aes(x=group_name, y=max_beta, fill=group_size), col="black",
+               stat="identity", width = 1) +
+      theme_light() +
+      scale_fill_manual(values = c( "#5e4fa2","#3288bd", "#99d594", "#e6f598")) +
+      scale_x_discrete(breaks=factor(unique(gid)), labels=gname) +
+      coord_polar()
+  }
+  
+  position <- list(length = len)
+  for (i in 1:len) {
+    position[[i]] <- jitter(rep(i, group_size[oo][i]))
+  }
+  
+  beta_scale <- list(length = len)
+  for (i in 1:len) {
+    beta_scale[[i]] <- split(abs(beta), group_name)[[i]] * scale[i]
+  }
+  
+  beta_sign <- list(length = len)
+  for (i in 1:len) {
+    beta_sign[[i]] <- split(data$sign, group_name)[[i]]
+  }
+  
+  beta_origin <- list(length = len)
+  for (i in 1:len) {
+    beta_origin[[i]] <- split(beta, group_name)[[i]]
+  }
+  
+  indexx <- list(length = len)
+  for (i in 1:len){
+    indexx[[i]] <- split(seq(sum(group_size)), group_name)[[i]]
+  }
+  
+  b_name <- list(length = len)
+  for (i in 1:len) {
+    b_name[[i]] <- split(beta_name, group_name)[[i]]
+  }
+  
+  sample_points <- list(length= len)
+  for (i in 1:len) {
+    sample_points[[i]] <- data.frame(position=position[[i]], beta_scale=beta_scale[[oo[i]]],
+                                     beta_sign=beta_sign[[oo[i]]], index=indexx[[oo[i]]], coef=beta_origin[[oo[i]]],
+                                     name=b_name[[oo[i]]])
+  }
+  
+  for (i in 1:len) {
+    sample_points[[i]]$tt <- paste0("Name : ", sample_points[[i]]$name,
+                                    "\nCoefficient : ", round(sample_points[[i]]$coef,4))
+  }
+  
+  p3 <- p2
+  for(i in 1:len){
+    loop_input <- paste0('geom_point_interactive(data=sample_points[[i]], aes(x=position, y=beta_scale,
+                       shape=beta_sign, colour=beta_sign, tooltip=tt, data_id=index))')
+    p3 <- p3 + eval(parse(text = loop_input))
+  }
+  
+  p4 <- p3 +
+    scale_shape_manual(name = 'sign of beta', values=c(1, 17)) +
+    scale_colour_manual(name = 'sign of beta', values = c('black', 'black', 'black')) +
+    labs(title = "Group Lasso",
+         subtitle = paste0("Lambda : ", lambda, ", Lambda type : ",lambda.type,"\nSort type : ", sort.type),
+         x="", y="", fill="Group size") +
+     theme(
+      plot.title = element_text(hjust = 0.5, size = 24, face = "bold"), 
+      plot.subtitle = element_text(size = 18),  
+      axis.text.x = element_text(size = 14),   
+      axis.text.y = element_text(size = 14),
+      axis.title.y = element_text(size = 16, face = "bold",
+                                  margin = margin(t = 10)),  
+      legend.title = element_text(size = 16),  
+      legend.text = element_text(size = 14)  ) +
+    guides(fill = guide_legend(ncol=2)) +
+    scale_y_continuous(labels = NULL)
+  p4 <- p4 + theme(plot.margin = unit(c(0, 1, 1, 1), "cm"))
+
+  
+  girafe(code = print(p4), width_svg = 12, height_svg = 10)
+}
+
+```
+
+```{r, fig.width=8, fig.height=16, dpi=300, fig.align='center'}
+MP_gLasso(
+  cv_object = group_lasso_model, 
+  group = grupy, 
+  lambda.type = "min",  # możemy użyć również "1se" dla bardziej złożonego modelu
+  sort.type = "mean",   # można zmienić na "max" dla sortowania według maksymalnych współczynników
+  max.shown = 16,       # maksymalnie 16 grup zmiennych na wykresie
+  intercept = TRUE      # uwzględnienie wyrazu wolnego
+)
+```
+
+W tym wykresie radarowym uwzględniamy współczynniki beta, które są estymowane w modelu regresji Lasso. Współczynniki te mogą być dodatnie lub ujemne, co odpowiada odpowiednio pozytywnemu lub negatywnemu wpływowi danej grupy zmiennych na wynik modelu.
+
+Podejście to pozwala bezpośrednio zobaczyć, które grupy zmiennych mają największy wpływ oraz w jakim kierunku działają (dodatnio lub ujemnie). Dzięki temu możemy lepiej zrozumieć, jak każda grupa zmiennych kształtuje wynik modelu i które zmienne mają decydujący wpływ.
+
+### Krzywa błędu kroswalidacji
+
+```{r, fig.width=10, fig.height=8, dpi=300, fig.align='center'}
+
+
+cv_errors_group <- group_lasso_model$cvm
+lambda_values_group <- group_lasso_model$lambda
+std_errors_group <- group_lasso_model$cvsd
+
+cv_data_group <- data.frame(
+  Lambda = lambda_values_group,  
+  Misclassification_Error = cv_errors_group,
+  Std_Error = std_errors_group
+)
+
+ggplot(cv_data_group, aes(x = Lambda, y = Misclassification_Error)) +
+  geom_point(color = "#73213A", size = 3, alpha = 0.5) +
+  geom_errorbar(aes(ymin = Misclassification_Error - Std_Error,
+                    ymax = Misclassification_Error + Std_Error), 
+                width = 0.3, color = "#377EB8", alpha = 0.7) +  
+  geom_vline(xintercept = group_lasso_model$lambda.min,
+             linetype = "dashed", color = "black", linewidth = 1.2) +
+  annotate("text", x = group_lasso_model$lambda.min * 1.1, 
+           y = min(cv_data_group$Misclassification_Error) + 0.021, 
+           label = paste("Optymalna lambda:",
+                         round(group_lasso_model$lambda.min, 5)),
+           color = "black", size = 6, hjust = 0) +
+  labs(title = "Błąd klasyfikacji Grupowego Lasso w zależności od lambda",
+       subtitle = "Minimalny błąd kroswalidacji oraz zmienność błędów dla różnych wartości λ",
+       x = "Lambda", y = "Błąd klasyfikacji") +
+  scale_x_continuous(trans = "log10", 
+                     breaks = scales::trans_breaks("log10", function(x) 10^x),
+                     labels = scales::trans_format("log10",
+                                                   scales::math_format(10^.x))) +
+  scale_y_continuous(limits = c(0.095, 0.125),  
+                     breaks = seq(0.095, 0.125, by = 0.005)) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 16, hjust = 1),
+    axis.text.y = element_text(size = 16),
+    axis.title.y = element_text(margin = margin(r = 20)),
+    axis.title = element_text(size = 18, face = "bold"),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 18, face = "italic", hjust = 0.5),
+    legend.text = element_text(size = 14),
+    panel.grid.major = element_line(color = "gray80", linewidth = 0.6),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+Podobnie jak przypadku modelu zrelaksowanego LASSO, minimalny parametr lambda jest bardzo mały, wprowadzający małą regularyzacje. W związku z tym wybrane zostały wszystkie predyktory, nawet te, które wydają się nieistotne.
+
+# 3. Regresja logistyczna
+
+```{r}
+train_data$y <- as.factor(train_data$y)  
+test_data$y <- as.factor(test_data$y)    
+```
+
+Aby wybrać optymalną liczbę predyktorów do regresji logistycznej, stosujemy kryteria AIC (Akaike Information Criterion) i BIC (Bayesian Information Criterion), które pozwalają na ocenę jakości modeli uwzględniając zarówno dopasowanie modelu, jak i jego złożoność. Następnie porównujemy dokładności modeli na zbiorze treningowym, aby wybrać ten, który najlepiej równoważy błędy dopasowania i liczbę użytych zmiennych.
+
+```{r warning=FALSE}
+# Tworzymy pełny model regresji logistycznej
+full_model <- glm(y ~ ., data = train_data, family = binomial)
+
+```
+
+```{r warning=FALSE}
+# Selekcja zmiennych przy użyciu AIC (od pełnego modelu)
+model_aic <- stepAIC(full_model,
+                     direction = "both",
+                     k = 2,
+                     trace = 0)
+
+selected_variables_aic <- names(coef(model_aic))
+cat("Zmienne wybrane na podstawie AIC: ", selected_variables_aic, "\n")
+
+```
+
+```{r message=FALSE}
+# Selekcja zmiennych przy użyciu BIC (od pełnego modelu)
+model_Bic <- stepAIC(full_model,
+                     direction = "both",
+                     k = log(nrow(dane)),
+                     trace = 0)
+
+selected_variables_Bic <- names(coef(model_Bic))
+cat("Zmienne wybrane na podstawie BIC: ", selected_variables_Bic, "\n")
+```
+
+```{r}
+logit_model_AIC <- glm(y ~ day + duration + campaign + job + marital +
+                         education + housing + contact + loan + month + poutcome,
+                       data = train_data, family = binomial)
+
+logit_model_BIC <- glm(y ~ duration + housing  + month + poutcome + contact,
+                       data = train_data, family = binomial)
+
+```
+
+```{r}
+# Predykcje dla modelu AIC 
+pred_logit_AIC <- predict(logit_model_AIC, newdata = train_data, type = "response")
+pred_logit_AIC_bin <- ifelse(pred_logit_AIC > 0.5, 1, 0)
+accuracy_AIC <- mean(pred_logit_AIC_bin == y_train)
+cat("Dokładność modelu regresji dla AIC:", accuracy_AIC, "\n")
+
+# Predykcje dla modelu BIC 
+pred_logit_BIC <- predict(logit_model_BIC, newdata = train_data, type = "response")
+pred_logit_BIC_bin <- ifelse(pred_logit_BIC > 0.5, 1, 0)
+accuracy_BIC <- mean(pred_logit_BIC_bin == y_train)
+cat("Dokładność modelu regresji dla BIC:", accuracy_BIC, "\n")
+
+```
+
+Z wyników predykcji obu modeli widać, że dokładność predykcji modelu regresji logistycznej dla AIC wynosi 0.9061, podczas gdy model BIC osiąga dokładność 0.9011. Różnica ta jest stosunkowo niewielka, co sugeruje, że oba modele, mimo różnych zestawów zmiennych, radzą sobie niemal identycznie w przewidywaniu wyników na zbiorze treningowym.
+
+Warto zauważyć, że model wybrany na podstawie BIC jest prostszy, z mniejszą liczbą zmiennych, co może być korzystne w kontekście ogólnej interpretowalności oraz potencjalnej odporności na przeuczenie. Choć różnica w dokładności jest minimalna, prostszy model sugerowany przez BIC może być lepszym wyborem, gdyż często lepiej generalizuje na nowe dane, zmniejszając ryzyko overfittingu.
+
+```{r warning=FALSE}
+predictions_log <- predict(logit_model_BIC, newdata = test_data, type = "response")
+predicted_classes_log <- ifelse(predictions_log > 0.5, 1, 0)
+
+accuracy_BIC_test <- mean(pred_logit_BIC_bin == y_test)
+cat("Dokładność modelu regresji dla BIC:", accuracy_BIC_test, "\n")
+```
+
+### Macierz pomyłek
+
+Chemy sprawdzić jak regresja radzi sobie z przewidywaniem klas.
+
+```{r, fig.width=10, fig.height=8, dpi=300, fig.align='center'}
+actual_predicted_classes_log <- factor(predicted_classes_log, levels = c(0, 1))
+actual_classes_log <- factor(test_data$y, levels = c(0, 1))
+
+# Ocena wyników
+conf_matrix_log <- confusionMatrix(actual_predicted_classes_log,
+                                   actual_classes_log)
+
+conf_df_log <- as.data.frame(as.table(conf_matrix_log$table))
+
+names(conf_df_log) <- c("Actual", "Predicted", "Freq")
+
+# Wizualizacja 
+ggplot(conf_df_log, aes(x = Predicted, y = Actual, fill = Freq)) +
+  geom_tile(color = "#d3d3d3", linewidth = 1, width = 0.9, height = 0.9) +
+  geom_text(aes(label = Freq), size = 8, fontface = "bold", color = "white") +
+  scale_fill_gradientn(colors = c("#d3d3d3", "#D36687", "#73213A")) +
+  labs(
+    title = "Macierz Pomyłek",
+    subtitle = "Wyniki modelu regresji logistycznej",
+    x = "Przewidywane wartości",
+    y = "Rzeczywiste wartości",
+    fill = "Częstość"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 26, face = "bold", color = "#73213A"),
+    plot.subtitle = element_text(hjust = 0.5, size = 20, color = "gray40"),
+    axis.text = element_text(size = 16, face = "bold", color = "gray40"),
+    axis.title = element_text(size = 20, face = "bold", color = "#73213A"),
+    legend.position = "right",
+    legend.key.size = unit(1.2, "cm"),
+    legend.title = element_text(size = 20, face = "bold"),
+    legend.text = element_text(size = 16),
+    axis.title.y = element_text(size = 20, margin = margin(r = 20)),
+  )
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+TP <- conf_matrix_log$table[2, 2]  # True Positive
+TN <- conf_matrix_log$table[1, 1]  # True Negative
+FP <- conf_matrix_log$table[1, 2]  # False Positive
+FN <- conf_matrix_log$table[2, 1]  # False Negative
+
+# Obliczanie wskaźników
+sensitivity <- TP / (TP + FN)  # Czułość
+precision <- TP / (TP + FP)  # Precyzja
+f1_score <- 2 * (precision * sensitivity) / (precision + sensitivity)  # F1-score
+specificity <- TN / (TN + FP)  # Specyficzność
+```
+
+#### 1. Sensitivity (Czułość)
+
+$$
+\text{Sensitivity} = \frac{\text{TP}}{\text{TP} + \text{FN}} = \frac{48}{48 + 32} = \frac{48}{80} = 0.6 \, (60\%)
+$$
+
+#### 2. Specificity (Specyficzność)
+
+$$
+\text{Specificity} = \frac{\text{TN}}{\text{TN} + \text{FP}} = \frac{1172}{1172 + 104} = \frac{1172}{1276} \approx 0.9184 \, (91.84\%)
+$$
+
+#### 3. Precision (Precyzja)
+
+$$
+\text{Precision} = \frac{\text{TP}}{\text{TP} + \text{FP}} = \frac{48}{48 + 104} = \frac{48}{152} \approx 0.3158 \, (31.58\%)
+$$
+
+#### 4. F1-score
+
+$$
+\text{F1} = 2 \cdot \frac{\text{Precision} \cdot \text{Sensitivity}}{\text{Precision} + \text{Sensitivity}} = 2 \cdot \frac{0.3158 \cdot 0.6}{0.3158 + 0.6} = 2 \cdot \frac{0.1895}{0.9158} \approx 0.4137 \, (41.37\%)
+$$
+
+### Analiza błędów predykcji
+
+Analogicznie, jak wcześniej warto zweryfikować na jakich próbkach regresja popełnia błędy.
+
+```{r, fig.width=10, fig.height=8, dpi=300, fig.align='center'}
+test_data$predicted_probability_log <- predictions_log
+test_data$predicted_class_log <- as.factor(predicted_classes_log)
+
+test_data$error_log <- ifelse(test_data$predicted_class_log == test_data$y,
+                              "Poprawna", "Błąd")
+test_data$error_log <- as.factor(test_data$error_log)  
+
+ggplot(test_data, aes(x = as.numeric(row.names(test_data)), y = predictions_log)) +
+  geom_point(aes(color = error_log, shape = as.factor(y)), size = 4, alpha = 0.5) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "black", linewidth = 1) + 
+  facet_wrap(~y, nrow = 2, scales = "free_x") +
+  scale_color_manual(values = c("Poprawna" = "#33C430", "Błąd" = "#E31138")) +
+  scale_shape_manual(values = c("0" = 16, "1" = 17)) +
+  labs(
+    title = "Analiza błędów predykcji modelu regresji logistycznej",
+    subtitle = "Podział według rzeczywistej klasy (y) i podświetlenie błędów",
+    x = "Indeks obserwacji",
+    y = "Przewidywane prawdopodobieństwo",
+    color = "Typ predykcji",
+    shape = "Rzeczywiste y"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    strip.text = element_text(size = 22, face = "bold"),
+    plot.subtitle = element_text(size = 16),
+    plot.title = element_text(size = 24, face = "bold"),  
+    axis.title = element_text(size = 16),  
+    axis.title.y = element_text(size = 16, margin = margin(r = 20)),
+    axis.text = element_text(size = 12),  
+    legend.text = element_text(size = 14),  
+    legend.title = element_text(size = 16),
+    panel.spacing = unit(1.5, "lines")
+  )
+
+
+
+```
+
+Dla regresji można zauważyć problemy z predykcja obserwacji klasy 1.
+
+### Ważność zmiennych
+
+```{r, fig.width=10, fig.height=8, dpi=300, fig.align='center'}
+coefficients <- summary(logit_model_BIC)$coefficients
+
+coeff_df <- as.data.frame(coefficients)
+coeff_df$Variable <- rownames(coeff_df)
+
+# Obliczanie wartości bezwzględnych współczynników (norma L2)
+coeff_df$Abs_Estimate <- abs(coeff_df$Estimate)
+
+# Mapowanie zmiennych do grup
+group_mapping <- data.frame(
+  Variable = c("duration", "housingyes", "monthfeb", "monthmar", "monthapr",      "monthmay", "monthjun", "monthjul", "monthaug", "monthsep", "monthoct", "monthnov", "monthdec", "poutcomeother", "poutcomesuccess", "poutcomeunknown", "contacttelephone", "contactunknown"),
+  Group = c("duration", "housing", "month", "month", "month", "month", 
+            "month", "month", "month", "month", "month", "month", "month",
+            "poutcome", "poutcome", "poutcome",
+            "contact", "contact")
+)
+
+# Połączenie współczynników z grupami
+coeff_df <- merge(coeff_df, group_mapping, by = "Variable")
+
+coeff_df <- coeff_df[coeff_df$Variable != "(Intercept)", ]
+
+# Obliczanie normy L2 dla grup
+grouped_df <- coeff_df %>%
+  group_by(Group) %>%
+  summarise(
+    L2_Norm = sqrt(sum(Estimate^2)) 
+  )
+
+colors <- c("duration" = "#e6f598", "housing" = "#fee08b", "month" = "#5e4fa2" , 
+            "poutcome" = "#3288bd", "contact" = "#99d594")
+
+# Wizualizacja
+ggplot(grouped_df, aes(x = reorder(Group, L2_Norm), y = L2_Norm, fill = Group)) +
+  geom_bar(stat = "identity", color = "black", alpha = 0.8) +
+  coord_flip() +  
+  scale_fill_manual(values = colors) +
+  labs(
+    title = "Norma L2 współczynników dla grup predyktorów",
+    x = "Grupa zmiennych", 
+    y = "Norma L2 współczynników"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 22, face = "bold"),
+    axis.text = element_text(size = 14),
+    axis.title = element_text(size = 16, face = "bold"),
+    panel.grid.major = element_line(color = "#e6e6e6"),
+    panel.grid.minor = element_line(color = "#f2f2f2"),
+    plot.margin = margin(1, 1, 1, 3),  
+    legend.position = "none"  
+  )
+```
+
+# Podsumowanie i ocena.
+
+## 1. Wybrane predyktory.
+
+Sprawdźmy najpierw jakie predyktory wybrał każdy z tych modeli:
+
+| Predyktor | Regresja Logistyczna | Grupowe Lasso | Zrelaksowane Lasso |
+|:---------:|:--------------------:|:-------------:|:------------------:|
+|    Age    |                      |     **X**     |                    |
+|    Job    |                      |     **X**     |       **X**        |
+|  Marital  |                      |     **X**     |       **X**        |
+| Education |                      |     **X**     |       **X**        |
+|  Default  |                      |     **X**     |       **X**        |
+|  Balance  |                      |     **X**     |       **X**        |
+|  Housing  |        **X**         |     **X**     |       **X**        |
+|   Loan    |                      |     **X**     |       **X**        |
+|  Contact  |        **X**         |     **X**     |       **X**        |
+|    Day    |                      |     **X**     |       **X**        |
+|   Month   |        **X**         |     **X**     |       **X**        |
+| Duration  |        **X**         |     **X**     |       **X**        |
+| Campaign  |                      |     **X**     |       **X**        |
+|   Pdays   |                      |     **X**     |                    |
+| Previous  |                      |     **X**     |                    |
+| Poutcome  |        **X**         |     **X**     |       **X**        |
+
+Na podstawie wyników analizy możemy zauważyć, że:
+
+-   **Regresja Logistyczna**, oparta na kryterium **BIC**, wybrała 5 zmiennych, koncentrując się na tych, które miały największy wpływ na wynik klasyfikacji, przy jednoczesnym unikaniu nadmiernego dopasowania.
+
+-   **Grupowe Lasso** wybrało wszystkie zmienne, co sugeruje większą elastyczność modelu. Dodatkowo, bardzo mała wartość **lambda** uzyskana dla tego modelu wskazuje na mniejszą regularyzację, co oznacza, że model mniej karze za wprowadzenie dodatkowych zmiennych, pozwalając na ich pełne uwzględnienie.
+
+-   **Zrelaksowane Lasso** również wybrało dużą liczbę zmiennych (13), a mała wartość **lambda** w tym przypadku wskazuje na równie niską regularyzację, co pozwoliło na bardziej swobodny wybór cech, podobnie jak w Grupowym Lasso.
+
+Warto wspomnieć, że wszystkie zmienne wybrane przez regresje logistyczną, czyli `Housing`, `Contact`, `Month`, `Duration` i `Poutcome,` zostały uwzględnione również w pozostałych modelach. Co jest ważne, ponieważ oznacza to, że dla każdego z tych modeli te predyktory były istotne w klasyfikacji.
+
+```{r, fig.width=10, fig.height=12, dpi=300, fig.align='center'}
+grouped_df$Model <- "Regresja logistyczna"
+importance_df_group$Model <- "Grupowe Lasso"
+importance_df_rel$Model <- "Zrelaksowane Lasso"
+
+colnames(grouped_df) <- c("group", "importance", "Model")
+colnames(importance_df_group) <- c("group", "importance", "Model")
+colnames(importance_df_rel) <- c("group", "importance", "Model")
+
+combined_df <- rbind(grouped_df, importance_df_group, importance_df_rel)
+
+combined_df$group <- factor(combined_df$group, levels = unique(combined_df$group))
+
+# Wizualizacja
+ggplot(combined_df, aes(x = reorder(group, importance), y = importance, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black", alpha = 0.8) +
+  coord_flip() +  
+  scale_fill_manual(values = c("Regresja logistyczna" = "#3687D2", 
+                               "Grupowe Lasso" = "#A042BA", 
+                               "Zrelaksowane Lasso" = "#5FC471")) +
+  labs(
+    title = "Ważność zmiennych dla trzech modeli",
+    x = "Zmienna",
+    y = "Ważność (Norma L2)",
+    fill = "Model"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 20, face = "bold"),  
+    axis.text = element_text(size = 16),  
+    axis.title = element_text(size = 18),  
+    axis.title.y = element_text(size = 16, margin = margin(r = 20)),
+    legend.title = element_text(size = 16),  
+    legend.text = element_text(size = 14),  
+    plot.margin = margin(10, 20, 10, 20),  
+    panel.spacing = unit(1.5, "lines")  
+  ) 
+```
+
+## 2. Sprawdzenie czy modele myliły sie w podobnych miejscach.
+
+Zdajemy sobie sprawę, że każdy z naszych modeli popełnia błędy, jednak zależy nam na zrozumieniu, czy te błędy wynikają z niedoskonałości samych modeli, czy może są związane z charakterystyką naszych danych. Chcemy sprawdzić, czy modele myliły się w podobnych miejscach, co pozwoli nam lepiej zrozumieć, czy błędy są efektem ograniczeń modelu, czy też związane są z określonymi cechami danych, które mogą wpływać na jakość predykcji.
+
+```{r, fig.width=16, fig.height=8, dpi=300, fig.align='center'}
+test_data$original_index <- (1:nrow(standardized_data))[-trainIndex]
+
+# Filtrujemy dane dla błędnych predykcji
+test_data_group_error <- test_data[test_data$error_group_lasso == "Błąd", ]
+test_data_relax_error <- test_data[test_data$error_relaxed_lasso == "Błąd", ]
+test_data_log_error <- test_data[test_data$error_log == "Błąd", ]
+
+# Dodajemy informacje o modelu i prawdopodobieństwach
+test_data_group_error$model <- "Grupowe Lasso"
+test_data_group_error$probability <- test_data_group_error$predicted_probabilities_group_lasso
+
+test_data_relax_error$model <- "Zrelaksowane Lasso"
+test_data_relax_error$probability <- test_data_relax_error$predicted_probability
+
+test_data_log_error$model <- "Regresja logistyczna"
+test_data_log_error$probability <- test_data_log_error$predicted_probability_log
+
+combined_data <- rbind(test_data_group_error, test_data_relax_error, test_data_log_error)
+
+# Wizualizacja
+ggplot(combined_data, aes(x = original_index, y = probability)) +
+geom_point(aes(color = model, shape = as.factor(y)), size = 6, alpha = 0.6) + 
+geom_hline(yintercept = 0.5, linetype = "dashed", color = "black", linewidth = 1) +
+labs(
+title = "Błędy predykcji w trzech modelach",
+x = "\n Indeks obserwacji",
+y = "Przewidywane prawdopodobieństwo \n",
+color = "Model",
+shape = "Rzeczywiste y"
+) +
+scale_color_manual(values = c("Zrelaksowane Lasso" = "#0085FF", "Grupowe Lasso" = "#A600D5", "Regresja logistyczna" = "#30E951")) +
+scale_shape_manual(values = c("0" = 16, "1" = 17)) +
+theme_minimal() +
+theme(
+plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+axis.text = element_text(size = 14),
+axis.title = element_text(size = 14),
+legend.position = "top",
+legend.text = element_text(size = 16),
+legend.title = element_text(size = 16)
+)
+
+```
+
+Przedstawiony wykres dostarczaja nam cennych informacji na temat zachowania trzech modeli klasyfikacyjnych. Wykres rozrzutu błędów predykcji ujawnia, że wszystkie trzy modele - Grupowe Lasso, Regresja logistyczna i Zrelaksowane Lasso - mają tendencję do generowania podobnych błędów, szczególnie w obszarze niskich prawdopodobieństw.
+
+Większość nieprawidłowych klasyfikacji koncentruje się poniżej progu 0.5, co wskazuje na systematyczne trudności w identyfikacji przypadków pozytywnych. Rozkład błędów na przestrzeni wszystkich obserwacji sugeruje, że problemy klasyfikacyjne nie są ograniczone do konkretnych regionów danych, lecz występują w całym zbiorze.
+
+```{r, fig.width=8, fig.height=8, dpi=300, fig.align='center'}
+install.packages("ggvenn")
+group_lasso_errors <- test_data[test_data$error_group_lasso == "Błąd", "original_index"]
+relaxed_lasso_errors <- test_data[test_data$error_relaxed_lasso == "Błąd", "original_index"]
+logistic_errors <- test_data[test_data$error_log == "Błąd", "original_index"]
+
+# Diagram Venn'a
+error_list <- list(
+  "Group Lasso" = group_lasso_errors,
+  "Relaxed Lasso" = relaxed_lasso_errors,
+  "Logistic Regression" = logistic_errors
+)
+
+
+ggvenn::ggvenn(error_list, fill_color = c("#AE3CCE", "#2581D6", "#34CC4F")) +
+  labs(title = "Nakładanie się błędów w trzech modelach")
+
+```
+
+Diagram Venna potwierdza te obserwacje, jednocześnie ułatwiając interpretację. Dzięki wykresowi widzimy znaczące nakładanie się błędów między modelami. Aż **115** przypadków, stanowiących 75.2% wszystkich błędów, jest wspólnych dla wszystkich trzech modeli. To wskazuje na istnienie fundamentalnie trudnych do sklasyfikowania obserwacji w zbiorze danych.
+
+Każdy z modeli wykazuje również pewną liczbę unikalnych błędów - Grupowe Lasso ma 5 takich przypadków, Regresja logistyczna 8, a Zrelaksowane Lasso 4. Te unikalne błędy sugerują, że mimo ogólnego podobieństwa w zachowaniu, każdy model ma swoje specyficzne słabości i może być bardziej odpowiedni dla różnych aspektów analizowanych danych.
+
+Całościowa analiza wskazuje, że głównym wyzwaniem nie jest wybór konkretnego modelu, ale raczej natura samych danych, które zawierają przypadki trudne do poprawnej klasyfikacji niezależnie od zastosowanej metody.
+
+## 3. Porównanie
+
+Tabela przedstawia wyniki porównania wskaźników jakości predykcji dla trzech modeli klasyfikacyjnych: regresji logistycznej, grupowego Lasso oraz zrelaksowanego Lasso.
+
+|    Wskaźnik     | Regresja Logistyczna | Grupowe Lasso | Zrelaksowane Lasso |
+|:---------------:|:--------------------:|:-------------:|:------------------:|
+| **Dokładność**  |        83.89%        |    89.90%     |       90.34%       |
+| **Sensitivity** |         60%          |    61.32%     |       62.96%       |
+| **Specificity** |        91.84%        |    91.32%     |       92.07%       |
+|  **Precision**  |        31.58%        |    26.32%     |       33.55%       |
+|  **F1-score**   |        41.37%        |    36.86%     |       43.78%       |
+
+Patrząc jedynie na wyniki dokładności, najlepiej wypada model zrelaksowanego Lasso, osiągając wynik na poziomie 90.34%. Najsłabiej w zestawieniu wypada regresja logistyczna, z dokładnością wynoszącą 83.89%. Należy jednak zauważyć, że jest to stosunkowo prosty model oparty jedynie na pięciu predyktorach, podczas gdy grupowe Lasso uwzględniło wszystkie 16 zmiennych objaśniających.
+
+W tym kontekście wynik regresji logistycznej, choć jest niższy, nie jest tak odległy od dokładności grupowego Lasso (89.90%) i można uznać go za przyzwoity, biorąc pod uwagę prostotę modelu.
+
+Analizując pozostałe wskaźniki, można zauważyć, że każdy z modeli radzi sobie bardzo podobnie, wskaźniki osiągają zbliżone wartości. Co ważne, uzyskane wyniki mają sens w kontekście naszego zbioru danych gdzie liczba obserwacji klasy 0 jest znacznie większa niż klasy 1.
+
+Wszystkie modele skutecznie klasyfikują przypadki negatywne (klasy 0), co znajduje odzwierciedlenie w ich wysokich wartościach **specyficzności**. Natomiast wyzwaniem pozostaje **precyzja**, która mierzy odsetek prawidłowo sklasyfikowanych przypadków pozytywnych wśród wszystkich przewidzianych jako pozytywne. Niskie wartości precyzji mogą sugerować na trudności modeli w skutecznym identyfikowaniu przypadków pozytywnych.
+
+Ze względu na nierównowagę klas, kluczowym wskaźnikiem staje się **F1-score**, który uwzględnia zarówno precyzję, jak i czułość. Jest to szczególnie istotne, gdy wysoka dokładność może być myląca – model może poprawnie klasyfikować większość dominującej klasy, ignorując klasę mniejszościową. W tym zestawieniu model **zrelaksowanego Lasso** osiągnął najwyższą wartość F1-score, co czyni go najbardziej skutecznym w radzeniu sobie z zadaniem klasyfikacji przy nierównowadze klas.
+
+## Zatem który model jest najlepszy?
+
+Dla lepszego zobrazowania oceny klasyfikacji binarnej, użyjemy krzywej ROC, w której mierzymy zdolność modelu do rozrózniania pomiędzy dwoma klasami. Owa krzywa dostarcza nam wizualną reprezentacje wydajności klasyfikatora w zależności od wybranych progów decyzyjnych i umożliwia porównanie modeli.
+
+```{r fig.align='center', fig.height=8, fig.width=8, message=FALSE, dpi=300}
+library(pROC)
+
+# Obliczenie krzywych ROC dla każdego modelu
+roc_relaxed <- roc(y_test, predicted_probabilities_relaxed[, 1], levels = c(0, 1))
+roc_grouped <- roc(y_test, predicted_probabilities_group_lasso[, 1], levels = c(0, 1))
+roc_logistic <- roc(y_test, predictions_log, levels = c(0, 1))
+
+# Wizualizacja
+plot(roc_relaxed, col = "#3687D2", lwd = 3, main = "Krzywe ROC dla modeli")
+plot(roc_grouped, col = "#A042BA", lwd = 3, add = TRUE)
+plot(roc_logistic, col = "#5FC471", lwd = 3, add = TRUE)
+
+legend("bottomright", legend = c("Relaxed Lasso", "Grouped Lasso", "Logistic Regression"),
+       col = c("#3687D2", "#A042BA", "#5FC471"), lwd = 2)
+
+rl <- auc(roc_relaxed)
+grl <- auc(roc_grouped)
+rl <- auc(roc_logistic)
+
+```
+
+Krzywe ROC dla wszystkich modeli są prawie identyczne. Obliczone wartości AUC (pola pod wykresem) dla poszczególnych modeli są następujące:
+
+-   Zrelaksowane Lasso: 0.8757
+
+-   Grupowe Lasso: 0.8773
+
+-   Regresja logistyczna: 0.8700
+
+Jak widać, różnice w wartościach AUC są minimalne, z niewielką przewagą grupowego Lasso. Możemy zatem stwierdzić, że wszystkie modele osiągają porównywalną wydajność.
+
+Wobec tego, odpowiedź na pytanie który model jest najlepszy nie jest jednoznaczna, ponieważ to zależy, co jest naszym priorytetem. Każdy z przedstawionych modeli uzyskuje zadowalającą dokładność, zatem wybór pozostaje kwestią kompromisu między prostotą a złożonością modelu.
+
+Jeśli zależy nam na prostym, szybkim modelu, regresja logistyczna może być wystarczająca.
+
+Z kolei jeśli priorytetem jest uzyskanie jak najlepszej dokładności, szczególnie w kontekście nierównowagi klas, bardziej złożone modele, takie jak grupowe Lasso lub zrelaksowane Lasso, mogą przynieść lepsze rezultaty.
+
+Jednakże patrząc jedynie na dokładność zdaje się, że najlepiej radzi sobie zrelaksowane Lasso.
